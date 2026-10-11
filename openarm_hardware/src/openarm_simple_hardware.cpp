@@ -322,21 +322,44 @@ bool OpenArmHW::return_to_zero() {
                 start_pos[i]);
   }
 
+  // Every motor must have answered and report itself enabled without an
+  // error. A motor that never replied keeps its default position of 0.0,
+  // which would make the distance check below pass without meaning anything.
+  bool unsafe = false;
+  for (size_t i = 0; i < ARM_DOF; ++i) {
+    if (i >= arm_motors.size() || !arm_motors[i].is_enabled() ||
+        arm_motors[i].has_error()) {
+      RCLCPP_ERROR(rclcpp::get_logger("OpenArmHW"),
+                   "joint%zu: no reply, not enabled, or error (code 0x%X)", i + 1,
+                   i < arm_motors.size() ? arm_motors[i].get_error_code() : 0);
+      unsafe = true;
+    }
+  }
+  if (hand_) {
+    const auto& gripper_motors = openarm_->get_gripper().get_motors();
+    if (gripper_motors.empty() || !gripper_motors[0].is_enabled() ||
+        gripper_motors[0].has_error()) {
+      RCLCPP_ERROR(rclcpp::get_logger("OpenArmHW"),
+                   "gripper: no reply, not enabled, or error (code 0x%X)",
+                   gripper_motors.empty() ? 0 : gripper_motors[0].get_error_code());
+      unsafe = true;
+    }
+  }
+
   // Refuse to move if any joint is far from zero: a wrong zero or a badly
   // placed arm would otherwise be driven a long way at full stiffness.
-  bool too_far = false;
   for (size_t i = 0; i < ARM_DOF; ++i) {
     if (std::abs(start_pos[i] - ZERO_POSITION[i]) > MAX_START_OFFSET) {
       RCLCPP_ERROR(rclcpp::get_logger("OpenArmHW"),
                    "joint%zu is %+.3f rad from zero (limit %.2f rad)", i + 1,
                    start_pos[i] - ZERO_POSITION[i], MAX_START_OFFSET);
-      too_far = true;
+      unsafe = true;
     }
   }
-  if (too_far) {
+  if (unsafe) {
     RCLCPP_ERROR(rclcpp::get_logger("OpenArmHW"),
-                 "Not moving: place the arm near the zero pose (or check the motor zero) "
-                 "and relaunch. Disabling motors.");
+                 "Not moving: check the arm is powered, placed near the zero pose, and "
+                 "that the motor zero is right, then relaunch. Disabling motors.");
     openarm_->disable_all();
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     openarm_->recv_all();
