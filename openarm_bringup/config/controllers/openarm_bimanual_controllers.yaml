@@ -93,7 +93,7 @@ left_joint_trajectory_controller:
       - position
 
     # to achieve high real-time performance, interpolation is disabled and the controller is expected to receive high-frequency commands --- IGNORE ---
-    interpolation_method: "none"
+    interpolation_method: "splines"
     interpolate_from_desired_state: true
 
     state_publish_rate: 50.0
@@ -121,7 +121,7 @@ left_gripper_controller:
     state_interfaces:
       - position
 
-    interpolation_method: "none"
+    interpolation_method: "splines"
     constraints:
       stopped_velocity_tolerance: 0.0
       goal_time: 0.0
@@ -174,7 +174,7 @@ right_joint_trajectory_controller:
     state_interfaces:
       - position
 
-    interpolation_method: "none"
+    interpolation_method: "splines"
     interpolate_from_desired_state: true
 
     state_publish_rate: 50.0
@@ -202,7 +202,7 @@ right_gripper_controller:
     state_interfaces:
       - position
 
-    interpolation_method: "none"
+    interpolation_method: "splines"
     constraints:
       stopped_velocity_tolerance: 0.0
       goal_time: 0.0
