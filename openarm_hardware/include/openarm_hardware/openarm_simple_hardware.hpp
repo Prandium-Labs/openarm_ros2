@@ -145,8 +145,14 @@ class OpenArmHW : public hardware_interface::SystemInterface {
       0.0,  // joint7
   };
 
+  // Activation ramp to zero (patched on zeus, was 2 s with a full-stiffness
+  // step to 0 first): ramp duration, and the largest distance from zero any
+  // joint may start at before activation refuses to move.
+  static constexpr double RETURN_TO_ZERO_SECONDS = 10.0;
+  static constexpr double MAX_START_OFFSET = 0.5;  // rad, about 29 degrees
+
   // Helper methods
-  void return_to_zero();
+  bool return_to_zero();
   bool parse_config(const hardware_interface::HardwareInfo& info);
   void generate_joint_names();
 

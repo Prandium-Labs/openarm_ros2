@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <thread>
 #include <vector>
 
@@ -229,7 +230,9 @@ hardware_interface::CallbackReturn OpenArmHW::on_activate(
   openarm_->recv_all();
 
   // Return to zero position
-  return_to_zero();
+  if (!return_to_zero()) {
+    return CallbackReturn::ERROR;
+  }
 
   RCLCPP_INFO(rclcpp::get_logger("OpenArmHW"), "OpenArm V10 activated");
   return CallbackReturn::SUCCESS;
@@ -302,36 +305,59 @@ hardware_interface::return_type OpenArmHW::write(
   return hardware_interface::return_type::OK;
 }
 
-void OpenArmHW::return_to_zero() {
+bool OpenArmHW::return_to_zero() {
   RCLCPP_INFO(rclcpp::get_logger("OpenArmHW"), "Returning to zero position...");
 
+  // Read the current positions without sending any position command first
+  // (the original code sent a full-stiffness command to 0 before reading).
   openarm_->refresh_all();
-  // Return arm to zero with MIT control
-  std::vector<openarm::damiao_motor::MITParam> arm_params;
-  for (size_t i = 0; i < ARM_DOF; ++i) {
-    arm_params.push_back({kp_[i], kd_[i], 0.0, 0.0, 0.0});
-  }
-  openarm_->get_arm().mit_control_all(arm_params);
-
-  // Return gripper to zero if enabled
-  if (hand_) {
-    openarm_->get_gripper().mit_control_all(
-        {{gripper_kp_, gripper_kd_, GRIPPER_JOINT_0_POSITION, 0.0, 0.0}});
-  }
-  std::this_thread::sleep_for(std::chrono::microseconds(1000));
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
   openarm_->recv_all();
   const auto& arm_motors = openarm_->get_arm().get_motors();
 
   std::vector<double> start_pos(ARM_DOF, 0.0);
   for (size_t i = 0; i < ARM_DOF && i < arm_motors.size(); ++i) {
     start_pos[i] = arm_motors[i].get_position();
+    RCLCPP_INFO(rclcpp::get_logger("OpenArmHW"), "  joint%zu start: %+.3f rad", i + 1,
+                start_pos[i]);
   }
 
-  const int steps = 200;
+  // Refuse to move if any joint is far from zero: a wrong zero or a badly
+  // placed arm would otherwise be driven a long way at full stiffness.
+  bool too_far = false;
+  for (size_t i = 0; i < ARM_DOF; ++i) {
+    if (std::abs(start_pos[i] - ZERO_POSITION[i]) > MAX_START_OFFSET) {
+      RCLCPP_ERROR(rclcpp::get_logger("OpenArmHW"),
+                   "joint%zu is %+.3f rad from zero (limit %.2f rad)", i + 1,
+                   start_pos[i] - ZERO_POSITION[i], MAX_START_OFFSET);
+      too_far = true;
+    }
+  }
+  if (too_far) {
+    RCLCPP_ERROR(rclcpp::get_logger("OpenArmHW"),
+                 "Not moving: place the arm near the zero pose (or check the motor zero) "
+                 "and relaunch. Disabling motors.");
+    openarm_->disable_all();
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    openarm_->recv_all();
+    return false;
+  }
+
+  double gripper_start = GRIPPER_JOINT_0_POSITION;
+  if (hand_) {
+    const auto& gripper_motors = openarm_->get_gripper().get_motors();
+    if (!gripper_motors.empty()) {
+      gripper_start = gripper_motors[0].get_position();
+    }
+  }
+
+  // Slow ramp with gentle start and stop (was 200 x 10 ms = 2 s, linear).
+  const int steps = static_cast<int>(RETURN_TO_ZERO_SECONDS * 100.0);
   const int step_ms = 10;
 
   for (int step = 0; step <= steps; ++step) {
-    double t = static_cast<double>(step) / steps;  // 0.0 → 1.0
+    double u = static_cast<double>(step) / steps;  // 0.0 → 1.0
+    double t = u * u * (3.0 - 2.0 * u);            // smoothstep easing
 
     std::vector<openarm::damiao_motor::MITParam> arm_params;
     for (size_t i = 0; i < ARM_DOF; ++i) {
@@ -341,15 +367,29 @@ void OpenArmHW::return_to_zero() {
     openarm_->get_arm().mit_control_all(arm_params);
 
     if (hand_) {
+      double gripper_target =
+          gripper_start + t * (GRIPPER_JOINT_0_POSITION - gripper_start);
       openarm_->get_gripper().mit_control_all(
-          {{GRIPPER_KP, GRIPPER_KD, GRIPPER_JOINT_0_POSITION, 0.0, 0.0}});
+          {{GRIPPER_KP, GRIPPER_KD, gripper_target, 0.0, 0.0}});
     }
 
     openarm_->recv_all();
     std::this_thread::sleep_for(std::chrono::milliseconds(step_ms));
   }
 
+  // write() sends pos_commands_ every cycle, so make them match where the
+  // arm now is (they could hold stale targets after a re-activation).
+  for (size_t i = 0; i < ARM_DOF; ++i) {
+    pos_commands_[i] = ZERO_POSITION[i];
+    vel_commands_[i] = 0.0;
+    tau_commands_[i] = 0.0;
+  }
+  if (hand_ && pos_commands_.size() > ARM_DOF) {
+    pos_commands_[ARM_DOF] = motor_radians_to_joint(GRIPPER_JOINT_0_POSITION);
+  }
+
   RCLCPP_INFO(rclcpp::get_logger("OpenArmHW"), "Reached zero position");
+  return true;
 }
 
 // void OpenArmHW::return_to_zero() {
