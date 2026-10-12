@@ -180,7 +180,11 @@ hardware_interface::CallbackReturn OpenArmHW::on_init(
 
 hardware_interface::CallbackReturn OpenArmHW::on_configure(
     const rclcpp_lifecycle::State& /*previous_state*/) {
-  // Set callback mode to ignore during configuration
+  // Decode state replies from every motor from now on. The gripper starts in
+  // PARAM mode (openarm_can), which left its state unread until activation.
+  // read() also runs while the hardware is inactive (motors off), so joint
+  // states must be valid then too.
+  openarm_->set_callback_mode_all(openarm::damiao_motor::CallbackMode::STATE);
   openarm_->refresh_all();
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
   openarm_->recv_all();
