@@ -171,6 +171,10 @@ hardware_interface::CallbackReturn OpenArmHW::on_init(
   pos_states_.resize(total_joints, 0.0);
   vel_states_.resize(total_joints, 0.0);
   tau_states_.resize(total_joints, 0.0);
+  reply_missed_.resize(total_joints, 0.0);
+  motor_status_.resize(total_joints, 0.0);
+  last_responses_.resize(total_joints, 0);
+  reported_silent_.resize(total_joints, false);
 
   RCLCPP_INFO(rclcpp::get_logger("OpenArmHW"),
               "OpenArm V10 Simple HW initialized successfully");
@@ -202,6 +206,10 @@ OpenArmHW::export_state_interfaces() {
         joint_names_[i], hardware_interface::HW_IF_VELOCITY, &vel_states_[i]));
     state_interfaces.emplace_back(hardware_interface::StateInterface(
         joint_names_[i], hardware_interface::HW_IF_EFFORT, &tau_states_[i]));
+    state_interfaces.emplace_back(hardware_interface::StateInterface(
+        joint_names_[i], HW_IF_REPLY_MISSED, &reply_missed_[i]));
+    state_interfaces.emplace_back(hardware_interface::StateInterface(
+        joint_names_[i], HW_IF_MOTOR_STATUS, &motor_status_[i]));
   }
 
   return state_interfaces;
@@ -238,6 +246,7 @@ hardware_interface::CallbackReturn OpenArmHW::on_activate(
     return CallbackReturn::ERROR;
   }
 
+  active_ = true;
   RCLCPP_INFO(rclcpp::get_logger("OpenArmHW"), "OpenArm V10 activated");
   return CallbackReturn::SUCCESS;
 }
@@ -245,6 +254,7 @@ hardware_interface::CallbackReturn OpenArmHW::on_activate(
 hardware_interface::CallbackReturn OpenArmHW::on_deactivate(
     const rclcpp_lifecycle::State& /*previous_state*/) {
   RCLCPP_INFO(rclcpp::get_logger("OpenArmHW"), "Deactivating OpenArm V10...");
+  active_ = false;
 
   // Disable all motors (like full_arm.cpp exit)
   for (int i = 0; i < 3; ++i) {
@@ -259,8 +269,11 @@ hardware_interface::CallbackReturn OpenArmHW::on_deactivate(
 
 hardware_interface::return_type OpenArmHW::read(
     const rclcpp::Time& /*time*/, const rclcpp::Duration& /*period*/) {
-  // Receive all motor states
-  openarm_->refresh_all();
+  // Receive all motor states. Inactive (motors off): ask for them. Active:
+  // the replies to last cycle's MIT commands carry them already.
+  if (!active_) {
+    openarm_->refresh_all();
+  }
   openarm_->recv_all();
 
   // Read arm joint states
@@ -286,7 +299,48 @@ hardware_interface::return_type OpenArmHW::read(
     }
   }
 
+  update_motor_link();
   return hardware_interface::return_type::OK;
+}
+
+void OpenArmHW::update_motor_link() {
+  // A motor that stops answering raises no bus error (another node still
+  // acknowledges the frames), and its last state stays in place: without this
+  // the joint looks frozen and fine. Count cycles without a new reply.
+  auto update = [this](size_t j, uint64_t responses, uint8_t status) {
+    if (responses != last_responses_[j]) {
+      last_responses_[j] = responses;
+      reply_missed_[j] = 0.0;
+      if (reported_silent_[j]) {
+        reported_silent_[j] = false;
+        RCLCPP_INFO(rclcpp::get_logger("OpenArmHW"), "%s: replies again",
+                    joint_names_[j].c_str());
+      }
+    } else {
+      reply_missed_[j] += 1.0;
+      // 100 cycles = 0.2 s at 500 Hz: a short message once per episode
+      // (the gate faults much earlier, by its own threshold).
+      if (!reported_silent_[j] && reply_missed_[j] >= 100.0) {
+        reported_silent_[j] = true;
+        RCLCPP_WARN(rclcpp::get_logger("OpenArmHW"),
+                    "%s: no reply from motor for %.0f cycles", joint_names_[j].c_str(),
+                    reply_missed_[j]);
+      }
+    }
+    motor_status_[j] = static_cast<double>(status);
+  };
+  auto& arm = openarm_->get_arm();
+  const auto arm_motors = arm.get_motors();
+  for (size_t i = 0; i < ARM_DOF && i < arm_motors.size(); ++i) {
+    update(i, arm.get_link_stats(static_cast<int>(i)).responses, arm_motors[i].get_error_code());
+  }
+  if (hand_ && joint_names_.size() > ARM_DOF) {
+    auto& gripper = openarm_->get_gripper();
+    const auto gripper_motors = gripper.get_motors();
+    if (!gripper_motors.empty()) {
+      update(ARM_DOF, gripper.get_link_stats(0).responses, gripper_motors[0].get_error_code());
+    }
+  }
 }
 
 hardware_interface::return_type OpenArmHW::write(

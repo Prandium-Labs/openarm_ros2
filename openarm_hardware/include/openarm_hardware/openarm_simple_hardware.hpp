@@ -15,6 +15,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstdint>
 #include <memory>
 #include <openarm/can/socket/openarm.hpp>
 #include <openarm/damiao_motor/dm_motor_constants.hpp>
@@ -135,6 +136,24 @@ class OpenArmHW : public hardware_interface::SystemInterface {
   std::vector<double> vel_states_;
   std::vector<double> tau_states_;
 
+  // Motor link per joint (gate check G12), exported as extra state interfaces:
+  //   reply_missed  control cycles in a row without a reply from that motor
+  //                 (openarm_can's per-axis response counter did not move)
+  //   motor_status  status/error nibble the motor reports in every reply
+  //                 (0 disabled, 1 enabled, >= 0x8 fault; see dm_motor_constants.hpp)
+  // The driver only reports; the gate decides what is too long (its config).
+  static constexpr const char* HW_IF_REPLY_MISSED = "reply_missed";
+  static constexpr const char* HW_IF_MOTOR_STATUS = "motor_status";
+  std::vector<double> reply_missed_;
+  std::vector<double> motor_status_;
+  std::vector<uint64_t> last_responses_;
+  std::vector<bool> reported_silent_;  // log once per silent episode, not every cycle
+
+  // True between on_activate and on_deactivate. While active, every write()
+  // sends an MIT command whose reply carries the state, so read() requests
+  // states (refresh) only while inactive: half the CAN frames per cycle.
+  bool active_ = false;
+
   static constexpr std::array<double, ARM_DOF> ZERO_POSITION = {
       0.0,  // joint1
       0.0,  // joint2
@@ -153,6 +172,7 @@ class OpenArmHW : public hardware_interface::SystemInterface {
 
   // Helper methods
   bool return_to_zero();
+  void update_motor_link();
   bool parse_config(const hardware_interface::HardwareInfo& info);
   void generate_joint_names();
 
