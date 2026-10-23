@@ -166,8 +166,10 @@ class OpenArmHW : public hardware_interface::SystemInterface {
 
   // Activation ramp to zero (patched on zeus, was 2 s with a full-stiffness
   // step to 0 first): ramp duration, and the largest distance from zero any
-  // joint may start at before activation refuses to move.
-  static constexpr double RETURN_TO_ZERO_SECONDS = 10.0;
+  // joint may start at before activation refuses to move. 3 s (was 10 s,
+  // 2026-10-23): with at most 0.5 rad to go and smoothstep easing, the peak
+  // speed is 1.5 x 0.5 / 3 = 0.25 rad/s.
+  static constexpr double RETURN_TO_ZERO_SECONDS = 3.0;
   static constexpr double MAX_START_OFFSET = 0.5;  // rad, about 29 degrees
 
   // Helper methods
